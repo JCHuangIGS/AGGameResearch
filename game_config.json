@@ -1,0 +1,29 @@
+{
+    "game_title": "Galaga (紅白機大蜜蜂) - 技術規格版",
+    "tagline": "Professional Technical Specification (1981 Arcade Logic)",
+    "genre": "Fixed Shooter (Fixed Screen)",
+    "platform": "Arcade (3x Z80) / NES / Modern Remake",
+    "audience": "Game Developers / Retro Preservationists",
+    "studio_name": "GameResearch Technical Team",
+    "version": "1.0",
+    "date": "2026-03-18",
+    "lead_designer": "Antigravity Research Agent",
+    "sections": {
+        "cover_page": "本文件為《大蜜蜂》(Galaga) 的完整技術設計手冊 (Technical GDD)，旨在為程式設計師與美術人員提供精確的開發基準與數值邏輯。",
+        "executive_summary": "《大蜜蜂》(Galaga) 是太空射擊遊戲的里程碑，引入了「雙機合體」與「非同步編隊進場」機制。本文件詳細解析其三 CPU 架構下的同步邏輯、16x16 精靈圖渲染限制、以及複雜的敵機進場座標規跡。",
+        "game_overview": "核心架構：基於 3.072 MHz Z80 CPU 叢集。視覺採 288x224 解析度。其核心體驗 pillars 為：1. 資源陷阱（被俘救援） 2. 精準連發彈幕感 3. 節奏化的挑戰關卡。",
+        "core_gameplay_loop": "系統狀態機分為：進場 (Entry) -> 編隊 (Formation) -> 俯衝攻擊 (Attack) -> 撤退 (Escape)。\n核心策略環節：誘發 Boss 釋放光束 -> 犧牲一命 -> 救援合體 -> 雙倍火力清場。",
+        "game_mechanics": "捕捉光束判定：Boss 在高度 1/2 以下處觸發倒三角形光束（寬 16-48px）。\n雙機合體：救援時需在 Dive 狀態擊墜 Boss 且不傷及備機。\n子彈限制：同畫面最大 2 發（單機）或 4 發（雙機）。",
+        "progression_system": "關卡循環：32 關階梯邏輯，循環至 255 關。每 4 關一次 Challenging Stage。\n動態難度 (Rank)：根據命中率、存活時間、合體狀態即時調整子彈與俯衝速率（0-255）。",
+        "content_design": "敵人 AI 分類：\n1. Boss Galaga: 2 點生命，具備光束技能。\n2. Guard (Butterfly): 變形潛力，具備弧形俯衝軌跡。\n3. Grunt (Bee): 基礎單位，直線或 S 型俯衝。",
+        "ux_interface": "硬體介面：水平控制面板優化、連發緩衝感。\nHUD 規範：1UP 分數（右上）、High Score（中上）、生命數（底部圖示）、關卡進度標誌（右下）。",
+        "art_direction": "色盤權重：BB-GGG-RRR (3-3-2 bit mix)。\n渲染轉換：Formation (Tile) 與 Diving (Sprite) 的無縫切換。\n視覺：三層視差滾動星空（0.1, 0.2, 0.5 px/frame）。",
+        "audio_design": "通道分派：CH1-BGM, CH2-SFX, CH3-優先權音效。\n音色：方波合成 (Square Wave) 與白噪音背景爆破感。",
+        "monetization_strategy": "街機營收平衡：單局 7-8 分鐘的高時長考驗運營轉化。後期的 Rank 飆升旨在控制高手遊玩時間。",
+        "technical_requirements": "處理器：3x Z80 叢集。共享 8KB RAM。\n中斷邏輯：CPU 1 週期性驅動 CPU 2 的更新程序。",
+        "competitive_analysis": "對標 Galaxian 作全方位升級：從同步編隊進化為螺旋非同步進場、從單發進化為救援合體火力。",
+        "development_roadmap": "技術原型 -> 5 組進場軌跡硬編碼 -> 牽引光束判定優化 -> 音效合成 -> 壓力測試。",
+        "risk_assessment": "技術風險：合體後 Hitbox 擴大 1.8 倍導致的意外死亡。營運風險：機台平均收益率下降。",
+        "appendices": "數值表：雜魚 50/100, 護衛 80/160, Boss 150/400/800/1600。\n歷史：挑戰關卡源於 Ogawa 發現的進場邏輯 Bug。"
+    }
+}
