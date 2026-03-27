@@ -38,6 +38,15 @@ export class VFXManager {
         return this.particles.length;
     }
 
+    public clearAll() {
+        for (let i = this.particles.length - 1; i >= 0; i--) {
+            const p = this.particles[i];
+            this.container.removeChild(p);
+            p.destroy({ children: true });
+        }
+        this.particles = [];
+    }
+
     /**
      * Create small sparks at a collision point
      */

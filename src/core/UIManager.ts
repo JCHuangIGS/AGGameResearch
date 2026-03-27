@@ -8,7 +8,7 @@ export class UIManager {
     // UI Elements
     private scoreText!: PIXI.Text;
     private highScoreText!: PIXI.Text;
-    private livesText!: PIXI.Text;
+    private livesContainer!: PIXI.Container;
     private levelLabel!: PIXI.Text;
     private levelIconsContainer!: PIXI.Container;
     
@@ -33,57 +33,68 @@ export class UIManager {
     }
 
     private initHUD() {
-        const textStyle = new PIXI.TextStyle({
-            fontFamily: 'Arial',
-            fontSize: 18,
-            fill: '#00FFFF',
-            dropShadow: {
-                color: '#00FFFF',
-                blur: 4,
-                distance: 0,
-            },
+        const textStyleRed = new PIXI.TextStyle({
+            fontFamily: 'Courier New', fontWeight: 'bold', fontSize: 24, fill: '#FF0000',
+            dropShadow: { color: '#FF0000', blur: 4, distance: 0 },
         });
 
-        // Score (Top Left)
-        this.scoreText = new PIXI.Text({ text: 'SCORE: 000000', style: textStyle });
-        this.scoreText.x = 20;
-        this.scoreText.y = 20;
+        const textStyleWhite = new PIXI.TextStyle({
+            fontFamily: 'Courier New', fontWeight: 'bold', fontSize: 24, fill: '#FFFFFF',
+            dropShadow: { color: '#FFFFFF', blur: 4, distance: 0 },
+        });
+
+        const textStyleCyan = new PIXI.TextStyle({
+            fontFamily: 'Courier New', fontWeight: 'bold', fontSize: 20, fill: '#00FFFF',
+            dropShadow: { color: '#00FFFF', blur: 4, distance: 0 },
+        });
+
+        // 1UP (Top Left)
+        const label1UP = new PIXI.Text({ text: '1UP', style: textStyleRed });
+        label1UP.x = 20; label1UP.y = 10;
+        this.hudContainer.addChild(label1UP);
+
+        this.scoreText = new PIXI.Text({ text: '0', style: textStyleWhite });
+        this.scoreText.x = 20; this.scoreText.y = 40;
         this.hudContainer.addChild(this.scoreText);
 
         // High Score (Top Middle)
-        this.highScoreText = new PIXI.Text({ text: 'HIGH SCORE: 000000', style: textStyle });
+        const labelHighScore = new PIXI.Text({ text: 'HIGH SCORE', style: textStyleRed });
+        labelHighScore.anchor.set(0.5, 0);
+        labelHighScore.x = GAME_WIDTH / 2; labelHighScore.y = 10;
+        this.hudContainer.addChild(labelHighScore);
+
+        this.highScoreText = new PIXI.Text({ text: '0', style: textStyleWhite });
         this.highScoreText.anchor.set(0.5, 0);
-        this.highScoreText.x = GAME_WIDTH / 2;
-        this.highScoreText.y = 20;
+        this.highScoreText.x = GAME_WIDTH / 2; this.highScoreText.y = 40;
         this.hudContainer.addChild(this.highScoreText);
 
-        // Lives (Bottom Left)
-        this.livesText = new PIXI.Text({ text: 'LIVES: 3', style: textStyle });
-        this.livesText.x = 20;
-        this.livesText.y = 560;
-        this.hudContainer.addChild(this.livesText);
+        // Lives Icons (Bottom Left)
+        this.livesContainer = new PIXI.Container();
+        this.livesContainer.x = 30;
+        this.livesContainer.y = GAME_HEIGHT - 30;
+        this.hudContainer.addChild(this.livesContainer);
 
         // Level Label (Bottom Right)
-        this.levelLabel = new PIXI.Text({ text: 'STAGE', style: textStyle });
+        this.levelLabel = new PIXI.Text({ text: 'STAGE', style: textStyleCyan });
         this.levelLabel.anchor.set(1, 1);
-        this.levelLabel.x = 780;
-        this.levelLabel.y = 540;
+        this.levelLabel.x = GAME_WIDTH - 20;
+        this.levelLabel.y = GAME_HEIGHT - 50;
         this.hudContainer.addChild(this.levelLabel);
 
         this.levelIconsContainer = new PIXI.Container();
-        this.levelIconsContainer.x = 780;
-        this.levelIconsContainer.y = 550;
+        this.levelIconsContainer.x = GAME_WIDTH - 20;
+        this.levelIconsContainer.y = GAME_HEIGHT - 20;
         this.hudContainer.addChild(this.levelIconsContainer);
 
-        this.initBonusUI(textStyle);
-        // Heat Bar (Top, below High Score)
+        this.initBonusUI(textStyleCyan);
+        // Heat Bar (Top Right, below 2UP area)
         this.heatBarContainer = new PIXI.Container();
-        this.heatBarContainer.x = 300;
+        this.heatBarContainer.x = GAME_WIDTH - 120;
         this.heatBarContainer.y = 50;
         this.hudContainer.addChild(this.heatBarContainer);
 
         this.heatBarBg = new PIXI.Graphics();
-        this.heatBarBg.rect(0, 0, 200, 10).fill({ color: 0x333333, alpha: 0.8 }).stroke({ color: 0x555555, width: 1 });
+        this.heatBarBg.rect(0, 0, 100, 10).fill({ color: 0x333333, alpha: 0.8 }).stroke({ color: 0x555555, width: 1 });
         this.heatBarContainer.addChild(this.heatBarBg);
 
         this.heatBarFill = new PIXI.Graphics();
@@ -128,12 +139,30 @@ export class UIManager {
     }
 
     public updateScore(score: number, highScore: number) {
-        this.scoreText.text = `SCORE: ${score.toString().padStart(6, '0')}`;
-        this.highScoreText.text = `HIGH SCORE: ${highScore.toString().padStart(6, '0')}`;
+        this.scoreText.text = score.toString();
+        this.highScoreText.text = highScore.toString();
     }
 
     public updateLives(lives: number) {
-        this.livesText.text = `LIVES: ${lives}`;
+        if (!this.livesContainer) return;
+        this.livesContainer.removeChildren();
+        
+        let startX = 0;
+        for (let i = 0; i < Math.min(lives - 1, 8); i++) {
+            const icon = this.drawFighterIcon();
+            icon.x = startX;
+            this.livesContainer.addChild(icon);
+            startX += 30;
+        }
+    }
+
+    private drawFighterIcon(): PIXI.Graphics {
+        const g = new PIXI.Graphics();
+        g.moveTo(0, -10).lineTo(10, 10).lineTo(-10, 10).closePath();
+        g.stroke({color: 0x00FFFF, width: 2, alpha: 0.8});
+        g.moveTo(0, -4).lineTo(4, 6).lineTo(-4, 6).closePath();
+        g.stroke({color: 0x00FFFF, width: 2, alpha: 0.8});
+        return g;
     }
 
     public updateLevel(level: number) {
@@ -199,7 +228,7 @@ export class UIManager {
     public updateHeatBar(percent: number, isFever: boolean) {
         this.heatBarFill.clear();
         const color = isFever ? 0xFF00FF : 0x00FFFF;
-        const width = Math.max(0, Math.min(200, percent * 2));
+        const width = Math.max(0, Math.min(100, percent));
         
         this.heatBarFill
             .rect(0, 0, width, 10)

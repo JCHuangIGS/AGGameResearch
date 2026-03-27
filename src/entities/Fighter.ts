@@ -1,8 +1,9 @@
 import * as PIXI from 'pixi.js';
 import * as Matter from 'matter-js';
 import { Bullet } from './Bullet';
-import { CATEGORY_PLAYER, PLAYER_MASK, PLAYER_FIRE_INTERVAL } from '../config/GameConfig';
+import { CATEGORY_PLAYER, PLAYER_MASK, PLAYER_FIRE_INTERVAL, PLAYER_BULLET_SPEED } from '../config/GameConfig';
 import { VFXManager } from '../core/VFXManager';
+import { SoundManager } from '../core/SoundManager';
 
 export class Fighter extends PIXI.Container {
     public body!: Matter.Body;
@@ -90,13 +91,8 @@ export class Fighter extends PIXI.Container {
     }
 
     public initPhysics(x: number, y: number, world: Matter.World) {
-        const h = (this.sideLength * Math.sqrt(3)) / 2;
-        
-        this.body = Matter.Bodies.fromVertices(x, y, [[
-            { x: 0, y: -h / 2 },
-            { x: this.sideLength / 2, y: h / 2 },
-            { x: -this.sideLength / 2, y: h / 2 }
-        ]], {
+        // Use a smaller circular hitbox for fairer bullet dodging (radius: 6 units)
+        this.body = Matter.Bodies.circle(x, y, 6, {
             inertia: Infinity,
             frictionAir: 0.1,
             label: "Player",
@@ -143,7 +139,7 @@ export class Fighter extends PIXI.Container {
         this.destroy({ children: true });
     }
 
-    public fire(world: Matter.World, container: PIXI.Container): Bullet[] | null {
+    public fire(world: Matter.World, container: PIXI.Container, isFever: boolean = false): Bullet[] | null {
         if (this.state !== 'ALIVE') return null;
         
         const now = Date.now();
@@ -155,29 +151,34 @@ export class Fighter extends PIXI.Container {
         const h = (this.sideLength * Math.sqrt(3)) / 2;
         const spawnX = this.x;
         const spawnY = this.y - h / 2;
+        
+        const bulletColor = isFever ? 0x0000FF : 0xFFFFFF;
 
         if (this.isDouble) {
             // Left bullet
-            const b1 = new Bullet(spawnX - 10, spawnY);
+            const b1 = new Bullet(spawnX - 10, spawnY, bulletColor);
             b1.isPiercing = this.isPiercing;
-            b1.initPhysics(world, -10);
+            b1.initPhysics(world, -PLAYER_BULLET_SPEED * 16.666 / 1000);
             container.addChild(b1);
             
             // Right bullet
-            const b2 = new Bullet(spawnX + 10, spawnY);
+            const b2 = new Bullet(spawnX + 10, spawnY, bulletColor);
             b2.isPiercing = this.isPiercing;
-            b2.initPhysics(world, -10);
+            b2.initPhysics(world, -PLAYER_BULLET_SPEED * 16.666 / 1000);
             container.addChild(b2);
             
             this.createMuzzleFlash(spawnX - 10, spawnY, container);
             this.createMuzzleFlash(spawnX + 10, spawnY, container);
+            SoundManager.getInstance().playShootSound();
             return [b1, b2];
         } else {
-            const bullet = new Bullet(spawnX, spawnY);
+            // Single bullet center
+            const bullet = new Bullet(spawnX, spawnY, bulletColor);
             bullet.isPiercing = this.isPiercing;
-            bullet.initPhysics(world, -10);
+            bullet.initPhysics(world, -PLAYER_BULLET_SPEED * 16.666 / 1000);
             container.addChild(bullet);
             this.createMuzzleFlash(spawnX, spawnY, container);
+            SoundManager.getInstance().playShootSound();
             return [bullet];
         }
     }

@@ -1,10 +1,12 @@
-export const GAME_WIDTH = 960;
-export const GAME_HEIGHT = 720;
+export const GAME_WIDTH = 540;
+export const GAME_HEIGHT = 960;
 
 // Player Tuning
 export const PLAYER_SPEED = 4.0; // Corrected: 4px per frame after fixing double physics update
 export const PLAYER_FIRE_INTERVAL = 150; // ms, GDD 規範 0.15s
-export const PLAYER_BULLET_SPEED = -10;
+export const PLAYER_BULLET_SPEED = 800; // units/sec, GDD 規範
+
+export const ENEMY_BASE_BULLET_SPEED = 450; // units/sec
 
 // Matter.js Collision Categories (Must be powers of 2)
 export const CATEGORY_PLAYER = 0x0001;

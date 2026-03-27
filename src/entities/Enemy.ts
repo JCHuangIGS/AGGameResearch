@@ -1,10 +1,11 @@
 import * as PIXI from 'pixi.js';
 import * as Matter from 'matter-js';
 import { SHAPES } from '../config/Shapes';
-import { CATEGORY_ENEMY, ENEMY_MASK, GAME_HEIGHT } from '../config/GameConfig';
+import { CATEGORY_ENEMY, ENEMY_MASK, GAME_HEIGHT, ENEMY_BASE_BULLET_SPEED } from '../config/GameConfig';
 import { VFXManager } from '../core/VFXManager';
 import { EnemyBullet } from './EnemyBullet';
 import { Fighter } from './Fighter';
+import { SoundManager } from '../core/SoundManager';
 
 export type EnemyState = 'ENTERING' | 'FORMATION' | 'DIVING' | 'CAPTURING' | 'DEAD';
 
@@ -183,6 +184,8 @@ export class Enemy extends PIXI.Container {
                         this.state = 'DEAD'; 
                     } else if (this.targetPos && currentTarget === this.targetPos) {
                         this.state = 'FORMATION';
+                        // GDD Phase 4: 進入陣位後角度歸零 (面朝下方)
+                        Matter.Body.setAngle(this.body, 0);
                         Matter.Body.set(this.body, 'isSensor', false);
                         Matter.Body.setVelocity(this.body, { x: 0, y: 0 });
                         return;
@@ -192,10 +195,13 @@ export class Enemy extends PIXI.Container {
             
             const speed = 6 * deltaFactor; 
             if (dist > 0) {
-                Matter.Body.setVelocity(this.body, {
-                    x: (dx / dist) * speed,
-                    y: (dy / dist) * speed
-                });
+                const vx = (dx / dist) * speed;
+                const vy = (dy / dist) * speed;
+                Matter.Body.setVelocity(this.body, { x: vx, y: vy });
+                
+                // GDD 規範: 實作飛行轉向 (Rotate to face velocity)
+                // Shapes naturally point UP (-90 degrees), so add PI/2
+                Matter.Body.setAngle(this.body, Math.atan2(vy, vx) + Math.PI / 2);
             }
         } else if (this.state === 'FORMATION') {
             this.time += 0.05 * deltaFactor;
@@ -243,6 +249,9 @@ export class Enemy extends PIXI.Container {
                 x: this.body.position.x + horizontalSpeed, 
                 y: this.body.position.y + diveSpeed 
             });
+            
+            // GDD 規範: 俯衝時戰機要朝向速度方向
+            Matter.Body.setAngle(this.body, Math.atan2(diveSpeed, horizontalSpeed) + Math.PI / 2);
 
             // Guard Transformation (Stage 4-6) - Morph sides randomly
             if (this.isTransforming && Math.random() < 0.005) {
@@ -259,23 +268,35 @@ export class Enemy extends PIXI.Container {
             }
 
             // Boss Galaga Tractor Beam Trigger
-            // GDD 02: Dive below 1/2 height and uninjured (health == 2 for boss)
-            if (this.sides === 6 && this.health === 2 && this.y > GAME_HEIGHT / 2 && Math.random() < 0.1) {
+            // GDD Phase 4: Boss 健康的 (HP=2) 俯衝至畫面 55% 高度時, 觸發光束 (不再隨機)
+            // BUG FIX: 雙機合體狀態下，魔王不使用牽引光線
+            const playerIsDual = this.playerRef && this.playerRef.isDouble;
+            if (this.sides === 6 && this.health === 2 && !this.capturedFighter && !playerIsDual && this.y > GAME_HEIGHT * 0.55 && this.y < GAME_HEIGHT * 0.65) {
                 this.state = 'CAPTURING';
                 this.captureTimer = this.CAPTURE_DURATION;
                 Matter.Body.setVelocity(this.body, { x: 0, y: 0 });
+                // GDD Phase 4: Boss 停住不動, 面朝下方
+                Matter.Body.setAngle(this.body, 0);
                 console.log("Boss Galaga starting Tractor Beam!");
             }
         } else if (this.state === 'CAPTURING') {
-            this.captureTimer -= delta;
-            if (this.captureTimer <= 0) {
-                // GDD: 作用結束後飛回原位
-                this.state = 'ENTERING'; // 使用 ENTERING 會讓它自動往 targetPos 飛
-                if (this.tractorBeam && this.tractorBeam.cleanup) {
-                    this.tractorBeam.cleanup();
-                    this.tractorBeam = null;
+            // Bug 2 Fix: 如果已經捕獲戰機並且戰機還在被吸引中，不要倒數計時
+            // Boss 必須等待戰機完全黏上才能飛回
+            if (this.capturedFighter) {
+                // 有捕獲目標 → 無限等待，由 GameApp 的 updateCaptureLogic 處理狀態切換
+                // Boss 保持停住不動
+                Matter.Body.setVelocity(this.body, { x: 0, y: 0 });
+            } else {
+                // 沒有捕獲到任何戰機 → 正常倒數，時間到就飛回
+                this.captureTimer -= delta;
+                if (this.captureTimer <= 0) {
+                    this.state = 'ENTERING';
+                    if (this.tractorBeam && this.tractorBeam.cleanup) {
+                        this.tractorBeam.cleanup();
+                        this.tractorBeam = null;
+                    }
+                    console.log("Boss Galaga 牽引光束時間結束(未捕獲)，正在飛回原位。");
                 }
-                console.log("Boss Galaga 牽引光束時間結束，正在飛回原位。");
             }
         }
 
@@ -292,53 +313,70 @@ export class Enemy extends PIXI.Container {
         console.log("Enemy started diving!");
     }
 
-    public fire(world: Matter.World, layer: PIXI.Container, rank: number): EnemyBullet | null {
+    public fire(world: Matter.World, layer: PIXI.Container, rank: number, stage: number = 1): EnemyBullet | EnemyBullet[] | null {
         if (this.state !== 'DIVING') return null;
         
         // Only fire if high enough on screen
         if (this.y < 50 || this.y > GAME_HEIGHT - 240) return null;
 
-        const bullet = new EnemyBullet(this.x, this.y);
+        // GDD 5.1: Bullet speed scales with both rank and stage
+        // Base: 450 + (Stage * 15) px/s, then multiplied by rank factor
+        const effectiveRank = rank / 25.5; // Scale 0-255 to 0-10
+        const stageBonus = stage * 15; // +15 px/s per stage
+        const bulletSpeedUnitsPerSec = (ENEMY_BASE_BULLET_SPEED + stageBonus) * (1 + effectiveRank * 0.15);
         
-        // Calculate bullet speed based on rank (GDD-adjusted for "quick fall": 3.0 - 4.5 px/ms)
-        const baseSpeedPxPerFrame = 3.0 + (rank / 255) * 1.5;
-        // Convert to px/ms for Matter.js (assuming 60fps)
-        const bulletSpeed = baseSpeedPxPerFrame; 
+        // Convert to px/frame for Matter.js
+        const bulletSpeed = bulletSpeedUnitsPerSec * (16.666 / 1000); 
 
-        let vx = 0;
-        let vy = bulletSpeed;
+        // Calculate base aim direction
+        let baseVx = 0;
+        let baseVy = bulletSpeed;
 
         // GDD 02: 高難度階段 (Rank > 10) 下，敵機將具有預測玩家位置並提前發彈的偏向
         if (this.playerRef && rank > 10) {
-            // Predator targeting: P_target = P_player + V_player * (dist / bulletSpeed)
             const dx = this.playerRef.x - this.x;
             const dy = this.playerRef.y - this.y;
             const dist = Math.sqrt(dx * dx + dy * dy);
-            
-            // Get player velocity (from Matter.js body)
             const pvx = this.playerRef.body.velocity.x;
             const pvy = this.playerRef.body.velocity.y;
-            
             const timeToHit = dist / bulletSpeed;
             const predictedX = this.playerRef.x + pvx * timeToHit;
             const predictedY = this.playerRef.y + pvy * timeToHit;
-            
             const aimDX = predictedX - this.x;
             const aimDY = predictedY - this.y;
             const aimDist = Math.sqrt(aimDX * aimDX + aimDY * aimDY);
-            
-            vx = (aimDX / aimDist) * bulletSpeed;
-            vy = (aimDY / aimDist) * bulletSpeed;
+            baseVx = (aimDX / aimDist) * bulletSpeed;
+            baseVy = (aimDY / aimDist) * bulletSpeed;
         } else if (this.playerRef) {
-            // Basic aiming: always aim at player when below Rank 10
             const dx = this.playerRef.x - this.x;
             const dy = this.playerRef.y - this.y;
             const dist = Math.sqrt(dx * dx + dy * dy);
-            vx = (dx / dist) * bulletSpeed;
-            vy = (dy / dist) * bulletSpeed;
+            baseVx = (dx / dist) * bulletSpeed;
+            baseVy = (dy / dist) * bulletSpeed;
         }
 
-        bullet.initPhysics(world, { x: vx, y: vy });
+        // BUG FIX: 雙機合體狀態下，Boss 魔王落彈增加為三顆 (扇形散射)
+        const playerIsDual = this.playerRef && this.playerRef.isDouble;
+        if (this.sides === 6 && playerIsDual) {
+            const bullets: EnemyBullet[] = [];
+            const spreadAngle = 0.25; // ~14 degrees spread per side
+            const baseAngle = Math.atan2(baseVy, baseVx);
+
+            for (let i = -1; i <= 1; i++) {
+                const angle = baseAngle + i * spreadAngle;
+                const vx = Math.cos(angle) * bulletSpeed;
+                const vy = Math.sin(angle) * bulletSpeed;
+                const bullet = new EnemyBullet(this.x, this.y);
+                bullet.initPhysics(world, { x: vx, y: vy });
+                layer.addChild(bullet);
+                bullets.push(bullet);
+            }
+            console.log("Boss fires 3 bullets (Dual Fighter active)!");
+            return bullets;
+        }
+
+        const bullet = new EnemyBullet(this.x, this.y);
+        bullet.initPhysics(world, { x: baseVx, y: baseVy });
         layer.addChild(bullet);
         return bullet;
     }
@@ -352,6 +390,9 @@ export class Enemy extends PIXI.Container {
         if (this.body) {
             if (vfx && this.state === 'DEAD' && !this.isEscaped) {
                 vfx.createExplosion(this.body.position.x, this.body.position.y, this.color, this.sides);
+                // GDD 10.2: 依據敵人階級播放 3 種不同深度的爆炸音
+                const pitch = this.sides === 6 ? 60 : this.sides === 4 ? 100 : 150;
+                SoundManager.getInstance().playExplosionSound(pitch);
             }
             if (this.body.plugin) {
                 this.body.plugin.sprite = null;

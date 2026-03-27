@@ -13,6 +13,14 @@ export class EnemyManager {
     private container: PIXI.Container;
     public playerRef: Fighter | null = null;
     public isChallengeStage: boolean = false;
+    public currentStage: number = 1;
+    public expectedEnemies: number = 0;
+    public spawnedEnemies: number = 0;
+    private spawnTimeouts: any[] = [];
+
+    public get isSpawning() {
+        return this.spawnedEnemies < this.expectedEnemies;
+    }
     
     private formationSlots: { x: number, y: number }[] = [];
     private rows: number = 5;
@@ -59,7 +67,7 @@ export class EnemyManager {
         
         for (let i = 0; i < count; i++) {
             // Delay each enemy in the batch
-            setTimeout(() => {
+            const tId = setTimeout(() => {
                 const enemy = new Enemy(sides);
                 const startPos = patternPoints[0] || { x: 400, y: -50 };
                 
@@ -80,60 +88,46 @@ export class EnemyManager {
                 enemy.state = 'ENTERING';
 
                 this.enemies.push(enemy);
+                this.spawnedEnemies++;
                 
                 enemy.onFighterReleased = (isHostile: boolean) => {
                     if (this.onFighterReleased) this.onFighterReleased(enemy, isHostile);
                 };
             }, i * 150); // 150ms delay between enemies in a batch
+            this.spawnTimeouts.push(tId);
         }
     }
 
     private generatePatternPoints(batchIndex: number): { x: number, y: number }[] {
-        const points: { x: number, y: number }[] = [];
+        // GDD Phase 3: 實作「從螢幕底端飛入、360 度大迴旋、前往頂端陣位」及「從螢幕頂端切入、U型俯衝」
         
-        switch (batchIndex) {
-            case 0: // Batch 1: Left-top spiral down (4 Boss + 4 Guard)
-                points.push({ x: 200, y: -50 });
-                points.push({ x: 150, y: 150 });
-                points.push({ x: 300, y: 300 });
-                points.push({ x: 450, y: 200 });
-                points.push({ x: 350, y: 100 });
-                points.push({ x: 200, y: 200 });
-                break;
-            case 1: // Batch 2: Right-top mirror spiral (8 Grunt)
-                points.push({ x: GAME_WIDTH * 0.75, y: -50 });
-                points.push({ x: GAME_WIDTH * 0.8, y: 150 });
-                points.push({ x: GAME_WIDTH * 0.625, y: 300 });
-                points.push({ x: GAME_WIDTH * 0.44, y: 200 });
-                points.push({ x: GAME_WIDTH * 0.56, y: 100 });
-                points.push({ x: GAME_WIDTH * 0.75, y: 200 });
-                break;
-            case 2: // Batch 3: Left mid, horizontal entry then turn up (8 Grunt)
-                points.push({ x: -50, y: 300 });
-                points.push({ x: 200, y: 300 });
-                points.push({ x: 300, y: 450 });
-                points.push({ x: 150, y: 500 });
-                points.push({ x: 50, y: 400 });
-                break;
-            case 3: // Batch 4: Right mid, horizontal entry then turn up (8 Guard)
-                points.push({ x: GAME_WIDTH + 50, y: 300 });
-                points.push({ x: GAME_WIDTH * 0.75, y: 300 });
-                points.push({ x: GAME_WIDTH * 0.625, y: 450 });
-                points.push({ x: GAME_WIDTH * 0.8, y: 500 });
-                points.push({ x: GAME_WIDTH * 0.94, y: 400 });
-                break;
-            case 4: // Batch 5: Bottom 1/4 U-turn (8 Grunt)
-                points.push({ x: GAME_WIDTH * 0.25, y: GAME_HEIGHT + 50 });
-                points.push({ x: GAME_WIDTH * 0.5, y: GAME_HEIGHT * 0.625 });
-                points.push({ x: GAME_WIDTH * 0.75, y: GAME_HEIGHT + 50 });
-                points.push({ x: GAME_WIDTH * 0.875, y: GAME_HEIGHT * 0.7 });
-                points.push({ x: GAME_WIDTH * 0.5, y: 200 });
-                break;
-            default:
-                points.push({ x: 400, y: -50 });
+        // Helper 1: U形下切再上折 (Cubic Bezier)
+        const getCubicBezier = (p0: any, p1: any, p2: any, p3: any, segments: number) => {
+            const pts = [];
+            for(let i=0; i<=segments; i++){
+                const t = i / segments;
+                const mt = 1 - t;
+                const x = mt*mt*mt*p0.x + 3*mt*mt*t*p1.x + 3*mt*t*t*p2.x + t*t*t*p3.x;
+                const y = mt*mt*mt*p0.y + 3*mt*mt*t*p1.y + 3*mt*t*t*p2.y + t*t*t*p3.y;
+                pts.push({x, y});
+            }
+            return pts;
         }
-        
-        return points;
+
+        switch (batchIndex) {
+            case 0: // Batch 1: 從螢幕頂端正中切入、U型俯衝、前往頂端陣位 (Boss + Guard)
+                return getCubicBezier({x: GAME_WIDTH / 2, y: -50}, {x: GAME_WIDTH / 2, y: GAME_HEIGHT * 0.4}, {x: -100, y: GAME_HEIGHT * 0.6}, {x: GAME_WIDTH * 0.2, y: 300}, 30);
+            case 1: // Batch 2: 從螢幕左上飛入、大弧線迴旋、前往陣位
+                return getCubicBezier({x: -50, y: -50}, {x: GAME_WIDTH * 0.6, y: GAME_HEIGHT * 0.35}, {x: GAME_WIDTH * 0.1, y: GAME_HEIGHT * 0.5}, {x: GAME_WIDTH * 0.3, y: 250}, 30);
+            case 2: // Batch 3: 從螢幕右上飛入、大弧線迴旋、前往陣位
+                return getCubicBezier({x: GAME_WIDTH + 50, y: -50}, {x: GAME_WIDTH * 0.4, y: GAME_HEIGHT * 0.35}, {x: GAME_WIDTH * 0.9, y: GAME_HEIGHT * 0.5}, {x: GAME_WIDTH * 0.7, y: 250}, 30);
+            case 3: // Batch 4: 頂端左側切入，Sweeping Dive
+                return getCubicBezier({x: -50, y: 100}, {x: GAME_WIDTH * 0.8, y: 400}, {x: 0, y: 600}, {x: GAME_WIDTH * 0.4, y: 300}, 30);
+            case 4: // Batch 5: 頂端右側切入，Sweeping Dive
+                return getCubicBezier({x: GAME_WIDTH + 50, y: 100}, {x: GAME_WIDTH * 0.2, y: 400}, {x: GAME_WIDTH, y: 600}, {x: GAME_WIDTH * 0.6, y: 300}, 30);
+            default:
+                return [{ x: GAME_WIDTH / 2, y: -50 }];
+        }
     }
 
     public getChallengePath(stageNum: number, batchIdx: number): { x: number, y: number }[] {
@@ -180,7 +174,8 @@ export class EnemyManager {
     }
 
     public spawnLevelSequence(level: number) {
-        this.isChallengeStage = [3, 7, 11, 19, 27].includes(level);
+        // GDD: 挑戰關卡在第 3, 7, 11, 15, 19, 23, 27... 關（每4關一次，從第3關開始）
+        this.isChallengeStage = level >= 3 && (level - 3) % 4 === 0;
         
         // GDD: 5 batches for every level start
         const batchConfigs = [
@@ -191,11 +186,15 @@ export class EnemyManager {
             { sides: 3, count: 8, startIndex: 32 }  // Batch 5: 8 Grunt
         ];
 
+        this.expectedEnemies = batchConfigs.reduce((sum, config) => sum + config.count, 0);
+        this.spawnedEnemies = 0;
+
         batchConfigs.forEach((config, i) => {
             const indices = Array.from({ length: config.count }, (_, j) => config.startIndex + j);
-            setTimeout(() => {
+            const tId = setTimeout(() => {
                 this.spawnBatch(i, config.sides, indices, level);
             }, i * 1800); // 1.8s delay between batches
+            this.spawnTimeouts.push(tId);
         });
     }
 
@@ -211,8 +210,9 @@ export class EnemyManager {
         if (!this.isChallengeStage && gameState === GameState.ATTACK && this.lastDiveTime > this.diveCooldown) {
             const formationEnemies = this.enemies.filter(e => e.state === 'FORMATION');
             if (formationEnemies.length > 0) {
-                // GDD: 2-3 enemies can dive together
-                const numDivers = Math.min(formationEnemies.length, 1 + Math.floor(Math.random() * 2));
+                // GDD 5.1: 2-3 enemies dive together, scaling with stage
+                const maxDivers = Math.min(3 + Math.floor(this.currentStage / 2), 8);
+                const numDivers = Math.min(formationEnemies.length, 1 + Math.floor(Math.random() * Math.min(maxDivers, 3)));
                 
                 for (let j = 0; j < numDivers; j++) {
                     const availableEnemies = this.enemies.filter(e => e.state === 'FORMATION');
@@ -235,9 +235,14 @@ export class EnemyManager {
             
             // Enemy Shooting
             if (!this.isChallengeStage && enemy.state === 'DIVING' && this.lastFireTime > currentFireCooldown) {
-                const bullet = enemy.fire(this.world, bulletLayer, rank);
-                if (bullet) {
-                    onFire(bullet);
+                const result = enemy.fire(this.world, bulletLayer, rank, this.currentStage);
+                if (result) {
+                    // Handle both single bullet and array of bullets (Boss 3-way spread)
+                    if (Array.isArray(result)) {
+                        result.forEach(b => onFire(b));
+                    } else {
+                        onFire(result);
+                    }
                     this.lastFireTime = 0;
                 }
             }
@@ -251,7 +256,16 @@ export class EnemyManager {
     }
     
     public clear() {
+            this.spawnTimeouts.forEach(clearTimeout);
+            this.spawnTimeouts = [];
         this.enemies.forEach(e => e.destroyEnemy(this.world));
         this.enemies = [];
+    }
+
+    public resetTimers() {
+        this.lastDiveTime = 0;
+        this.lastFireTime = 0;
+        this.diveCooldown = 2000;
+        this.isChallengeStage = false;
     }
 }

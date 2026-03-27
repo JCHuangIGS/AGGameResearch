@@ -1,4 +1,5 @@
 import * as PIXI from 'pixi.js';
+import { AdvancedBloomFilter } from 'pixi-filters';
 import * as Matter from 'matter-js';
 import { PLAYER_SPEED, GAME_WIDTH, GAME_HEIGHT } from '../config/GameConfig';
 import { Fighter } from '../entities/Fighter';
@@ -9,6 +10,7 @@ import { UIManager } from './UIManager';
 import { Enemy } from '../entities/Enemy';
 import { GameState } from '../types/GameTypes';
 import { EnemyBullet } from '../entities/EnemyBullet';
+import { SoundManager } from './SoundManager';
 
 
 export class GameApp {
@@ -31,6 +33,10 @@ export class GameApp {
   private keys: Record<string, boolean> = {};
   private uiManager!: UIManager;
 
+  // Touch / Pointer
+  private isPointerDown: boolean = false;
+  private lastPointerX: number = 0;
+
   // Game State
   private score: number = 0;
   private highScore: number = 0;
@@ -49,6 +55,9 @@ export class GameApp {
   private readonly HEAT_DECAY_RATE = 0.05; // per ms
   private shotsTotal: number = 0;
   private shotsHit: number = 0;
+
+  // GDD 5.2: Extra Lives (Extend) System
+  private nextExtendAt: number = 20000; // First extend at 20,000
 
   // Screen Shake
   private shakeIntensity: number = 0;
@@ -75,6 +84,10 @@ export class GameApp {
       resolution: window.devicePixelRatio || 1,
     });
     this.container.appendChild(this.pixiApp.canvas);
+    
+    // Initialize Audio
+    document.addEventListener('click', () => SoundManager.getInstance().init(), { once: true });
+    document.addEventListener('keydown', () => SoundManager.getInstance().init(), { once: true });
 
     // Load High Score
     const savedHighScore = localStorage.getItem('antigravity_highscore');
@@ -89,19 +102,44 @@ export class GameApp {
     this.pixiApp.stage.addChild(this.shapesLayer);
     this.pixiApp.stage.addChild(this.particlesLayer);
 
+    // Apply Neon Bloom Filter (Phase 2)
+    const bloomFilter = new AdvancedBloomFilter({
+        threshold: 0.25,
+        bloomScale: 1.3,
+        brightness: 1.0,
+        blur: 5
+    });
+    this.shapesLayer.filters = [bloomFilter];
+    this.particlesLayer.filters = [bloomFilter];
+
     // 2.1 Initialize Cyber Grid Background (GDD 規範)
     this.initCyberGrid();
 
-    // 2.2 Initialize Stars (多層次遠景流星效果)
-    for (let i = 0; i < 100; i++) {
+    // 2.2 Initialize Stars (三層星空動態視差滾動)
+    for (let i = 0; i < 120; i++) {
         const star = new PIXI.Graphics();
         const x = Math.random() * GAME_WIDTH;
         const y = Math.random() * GAME_HEIGHT;
-        const size = 1 + Math.random() * 2;
-        star.circle(0, 0, size).fill({ color: 0xFFFFFF, alpha: 0.5 + Math.random() * 0.5 });
+        
+        let pLayer = Math.random();
+        let size, speed, alpha, color;
+        
+        // Parallax Layers
+        if (pLayer < 0.6) { 
+            // Back layer: slow, small, dark blue
+            size = 0.8 + Math.random(); speed = 0.5 + Math.random()*0.5; alpha = 0.3; color = 0x8888AA;
+        } else if (pLayer < 0.9) { 
+            // Mid layer: medium
+            size = 1.5 + Math.random(); speed = 1.5 + Math.random(); alpha = 0.6; color = 0xBBBBFF;
+        } else { 
+            // Front layer: fast, big, bright white
+            size = 2.5 + Math.random(); speed = 3.5 + Math.random()*2; alpha = 0.9; color = 0xFFFFFF;
+        }
+        
+        star.circle(0, 0, size).fill({ color: color, alpha: alpha });
         star.x = x;
         star.y = y;
-        (star as any).speed = 0.5 + Math.random() * 1.5;
+        (star as any).speed = speed;
         this.bgLayer.addChild(star);
         this.stars.push(star);
     }
@@ -126,6 +164,29 @@ export class GameApp {
         }
     });
     window.addEventListener('keyup', (e) => this.keys[e.code] = false);
+
+    // Setup Pointer/Touch Input
+    this.pixiApp.canvas.style.touchAction = 'none'; // Prevent scrolling
+    this.pixiApp.canvas.addEventListener('pointerdown', (e) => {
+        this.isPointerDown = true;
+        this.lastPointerX = e.clientX;
+    });
+    this.pixiApp.canvas.addEventListener('pointermove', (e) => {
+        if (!this.isPointerDown) return;
+        const activeFighter = this.replacementPlayer || this.player;
+        if (!activeFighter || !activeFighter.body || activeFighter.state !== 'ALIVE') return;
+        
+        const dx = e.clientX - this.lastPointerX;
+        this.lastPointerX = e.clientX;
+        
+        // Relative Touch Sensitivity
+        const newX = activeFighter.x + dx * 1.5;
+        Matter.Body.setPosition(activeFighter.body, { x: newX, y: activeFighter.body.position.y });
+    });
+    const resetPointer = () => this.isPointerDown = false;
+    this.pixiApp.canvas.addEventListener('pointerup', resetPointer);
+    this.pixiApp.canvas.addEventListener('pointercancel', resetPointer);
+    this.pixiApp.canvas.addEventListener('pointerout', resetPointer);
 
     // DEV CHEAT: Expose setLevel to window
     (window as any).setLevel = (level: number) => {
@@ -193,7 +254,7 @@ export class GameApp {
               const hostileFighter = new Enemy(3);
               hostileFighter.color = 0xFF0000;
               hostileFighter.points = 500;
-              (hostileFighter as any).isHostile = true; // Flag for special behavior if needed
+              (hostileFighter as any).isHostile = true;
               
               hostileFighter.initPhysics(fighter.x, fighter.y, this.engine.world);
               this.shapesLayer.addChild(hostileFighter);
@@ -202,8 +263,12 @@ export class GameApp {
               // Start diving immediately
               hostileFighter.state = 'DIVING';
               
-              // Remove the original fighter entity
+              // BUG FIX: 完整清除被俘虜戰機（含 Matter.js body），避免殘留幽靈物件
               fighter.state = 'DEAD';
+              (fighter as any)._isFalling = false;
+              if (fighter.body) {
+                  Matter.World.remove(this.engine.world, fighter.body);
+              }
               this.shapesLayer.removeChild(fighter);
           } else {
               // Rescue possible - handled by falling logic already in updateCaptureLogic
@@ -255,6 +320,11 @@ export class GameApp {
                     // GDD: Red explosion for rescue failure
                     this.vfxManager.createExplosion(fighter.x, fighter.y, 0xFF0000, 3);
                     fighter.state = 'DEAD';
+                    (fighter as any)._isFalling = false;
+                    // BUG FIX: 從 Matter 世界移除 body，避免殘留
+                    if (fighter.body) {
+                        Matter.World.remove(this.engine.world, fighter.body);
+                    }
                     this.shapesLayer.removeChild(fighter);
                     console.log("RESCUE FAILED: Captured fighter destroyed!");
                 }
@@ -264,8 +334,11 @@ export class GameApp {
             if ((bodyA.label === 'EnemyBullet' && bodyB.label === 'Player') ||
                 (bodyB.label === 'EnemyBullet' && bodyA.label === 'Player')) {
                 const bulletBody = bodyA.label === 'EnemyBullet' ? bodyA : bodyB;
+                const playerBody = bodyA.label === 'Player' ? bodyA : bodyB;
                 const bullet = bulletBody.plugin.sprite as EnemyBullet;
-                if (bullet && !bullet.destroyed) {
+                const hitFighter = playerBody.plugin?.sprite as Fighter;
+                // BUG FIX: 只有 ALIVE 狀態的戰機才會被敵方子彈擊中
+                if (bullet && !bullet.destroyed && hitFighter && hitFighter.state === 'ALIVE') {
                     bullet.destroyBullet(this.engine.world);
                     this.handlePlayerHit();
                 }
@@ -276,10 +349,11 @@ export class GameApp {
                 const enemyBody = bodyA.label === 'Enemy' ? bodyA : bodyB;
                 const fighterBody = bodyA.label === 'Player' ? bodyA : bodyB;
 
-                const player = fighterBody.plugin.sprite as Fighter;
-                const enemy = enemyBody.plugin.sprite as any;
+                const player = fighterBody.plugin?.sprite as Fighter;
+                const enemy = enemyBody.plugin?.sprite as any;
 
-                if (player && enemy && !player.destroyed && !enemy.destroyed && !player.isInvulnerable) {
+                // BUG FIX: 只有 ALIVE 狀態才處理碰撞，避免 CAPTURED/DEAD 狀態觸發
+                if (player && enemy && player.state === 'ALIVE' && !player.destroyed && !enemy.destroyed && !player.isInvulnerable) {
                     // 敵人受傷或爆炸
                     enemy.takeDamage(10, this.vfxManager);
                     
@@ -295,19 +369,21 @@ export class GameApp {
   }
 
   private update(delta: number) {
+    const normalDeltaFactor = delta / 16.6;
+
+    // Fever only affects player — compute a scaled delta for player input only
     const feverMult = this.isFeverMode ? 1.5 : 1.0;
-    const scaledDelta = delta * feverMult;
-    const deltaFactor = scaledDelta / 16.6;
+    const playerDelta = delta * feverMult;
 
     // 0. Update Cyber Grid scroll
-    this.gridScrollOffset += 0.5 * deltaFactor;
+    this.gridScrollOffset += 0.5 * normalDeltaFactor;
     if (this.gridScrollOffset >= 50) this.gridScrollOffset -= 50;
     this.drawCyberGrid();
 
     // 0.1 Update Stars (Pause during BONUS state as per GDD)
     if (this.state !== GameState.BONUS) {
         this.stars.forEach(star => {
-            star.y += (star as any).speed * deltaFactor;
+            star.y += (star as any).speed * normalDeltaFactor;
             if (star.y > GAME_HEIGHT) {
                 star.y = -10;
                 star.x = Math.random() * GAME_WIDTH;
@@ -315,25 +391,25 @@ export class GameApp {
         });
     }
 
-    // 1. Handle Input (Uses scaledDelta via handleInput internal logic)
-    this.handleInput(scaledDelta);
+    // 1. Handle Input — player moves & fires faster during fever
+    this.handleInput(playerDelta);
 
-    // 2. Update Matter.js engine (Speeds up physics by feverMult)
-    Matter.Engine.update(this.engine, scaledDelta);
+    // 2. Update Matter.js engine — normal speed (enemies use normal delta)
+    Matter.Engine.update(this.engine, delta);
 
-    // 3. Update Enemy Manager (Speeds up AI by feverMult)
+    // 3. Update Enemy Manager — normal speed (enemies NOT affected by fever)
     this.enemyManager.update(
-        scaledDelta, 
+        delta, 
         this.vfxManager, 
         this.state, 
         this.shapesLayer,
         this.rank,
         (bullet) => this.enemyBullets.push(bullet)
     );
-    this.updateCaptureLogic(scaledDelta);
+    this.updateCaptureLogic(delta);
 
-    // 4. Update VFX
-    this.vfxManager.update(scaledDelta);
+    // 4. Update VFX — normal speed
+    this.vfxManager.update(delta);
 
     // 5. Update Screen Shake
     if (this.shakeIntensity > 0.1) {
@@ -366,7 +442,8 @@ export class GameApp {
     }
 
     // 7. Level progression
-    if (this.state === GameState.ATTACK && 
+    if ((this.state === GameState.ATTACK || this.state === GameState.ENTRY) && 
+        !this.enemyManager.isSpawning &&
         this.enemyManager.enemies.length === 0 && 
         this.vfxManager.getParticleCount() === 0) {
         
@@ -422,11 +499,11 @@ export class GameApp {
         }
     }
 
-    // 5. 敵人子彈清理 (一碰到螢幕底部 580px 即清除)
+    // 5. 敵人子彈清理 (一路落到畫面之外)
     for (let i = this.enemyBullets.length - 1; i >= 0; i--) {
         const bullet = this.enemyBullets[i];
         bullet.update();
-        if (bullet.destroyed || bullet.y > 580) {
+        if (bullet.destroyed || bullet.y > GAME_HEIGHT + 20) {
             if (!bullet.destroyed) {
                 bullet.destroyBullet(this.engine.world);
             }
@@ -436,20 +513,33 @@ export class GameApp {
   }
 
   private handlePlayerHit() {
-      if (this.player.isInvulnerable) return;
+      // BUG FIX: 操作的一定是「當前活動戰機」，而非固定的 this.player
+      const activeFighter = this.replacementPlayer || this.player;
+      if (!activeFighter || activeFighter.isInvulnerable) return;
+
+      // GDD Phase 4: 合體機中彈 → 僅退回單機模式，不扣命
+      if (activeFighter.isDouble) {
+          activeFighter.setDouble(false);
+          activeFighter.invulnerableTimer = 1500; // 短暫無敵
+          this.vfxManager.createExplosion(activeFighter.x + 14, activeFighter.y, 0x00FFFF, 3);
+          this.shakeIntensity = 10;
+          SoundManager.getInstance().playExplosionSound();
+          console.log("Dual Fighter hit — reverted to single mode!");
+          return;
+      }
 
       this.lives--;
       this.uiManager.updateLives(this.lives);
       
       // 原地爆炸
-      this.vfxManager.createExplosion(this.player.x, this.player.y, 0x00FFFF, 3);
+      this.vfxManager.createExplosion(activeFighter.x, activeFighter.y, 0x00FFFF, 3);
       this.shakeIntensity = 20;
 
       // 隱藏戰機並停止物理
-      this.player.visible = false;
-      this.player.state = 'DEAD';
-      Matter.Body.setPosition(this.player.body, { x: -1000, y: -1000 });
-      Matter.Body.setVelocity(this.player.body, { x: 0, y: 0 });
+      activeFighter.visible = false;
+      activeFighter.state = 'DEAD';
+      Matter.Body.setPosition(activeFighter.body, { x: -1000, y: -1000 });
+      Matter.Body.setVelocity(activeFighter.body, { x: 0, y: 0 });
 
       // 罰分：重置熱度
       this.heat = Math.max(0, this.heat - 30);
@@ -463,11 +553,11 @@ export class GameApp {
       } else {
           // 延遲復活
           setTimeout(() => {
-              this.player.visible = true;
-              this.player.state = 'ALIVE';
-              this.player.health = 100;
-              this.player.invulnerableTimer = 2000; // 2秒無敵
-              Matter.Body.setPosition(this.player.body, { x: GAME_WIDTH / 2, y: GAME_HEIGHT - 80 });
+              activeFighter.visible = true;
+              activeFighter.state = 'ALIVE';
+              activeFighter.health = 100;
+              activeFighter.invulnerableTimer = 2000; // 2秒無敵
+              Matter.Body.setPosition(activeFighter.body, { x: GAME_WIDTH / 2, y: GAME_HEIGHT - 80 });
               console.log("戰機於地板復活，進入短暫無敵狀態。");
           }, 1000);
       }
@@ -484,34 +574,70 @@ export class GameApp {
       // Hide Game Over UI
       this.uiManager.hideGameOverPanel();
 
-      // Clear all enemies (Enemy extends PIXI.Container, so it IS the sprite)
+      // --- 1. Clean up all enemies (including tractor beam VFX) ---
       this.enemyManager.enemies.forEach(e => {
+          // Cleanup tractor beam VFX if active
+          if (e.tractorBeam && e.tractorBeam.cleanup) {
+              e.tractorBeam.cleanup();
+              e.tractorBeam = null;
+          }
+          // Release capturedFighter reference
+          e.capturedFighter = null;
           this.shapesLayer.removeChild(e);
           if (e.body) Matter.World.remove(this.engine.world, e.body);
       });
       this.enemyManager.enemies = [];
 
-      // Clear all enemy bullets (EnemyBullet extends PIXI.Container)
+      // Reset EnemyManager internal timers
+      this.enemyManager.resetTimers();
+
+      // --- 2. Clean up all bullets ---
       this.enemyBullets.forEach(b => {
           this.shapesLayer.removeChild(b);
           if (b.body) Matter.World.remove(this.engine.world, b.body);
       });
       this.enemyBullets = [];
 
-      // Clear all player bullets
       this.bullets.forEach(b => b.destroyBullet(this.engine.world));
       this.bullets = [];
 
-      // Reset player
-      if (this.player.body) {
-          Matter.Body.setPosition(this.player.body, { x: GAME_WIDTH / 2, y: GAME_HEIGHT - 80 });
+      // --- 3. Clean up replacement player (if exists from capture mechanic) ---
+      if (this.replacementPlayer) {
+          if (this.replacementPlayer.body) {
+              Matter.World.remove(this.engine.world, this.replacementPlayer.body);
+          }
+          this.shapesLayer.removeChild(this.replacementPlayer);
+          this.replacementPlayer = null;
       }
-      this.player.setDouble(false);
+
+      // --- 4. Fully reset primary player ---
+      // Remove the old player body first, then recreate cleanly
+      if (this.player.body) {
+          Matter.World.remove(this.engine.world, this.player.body);
+      }
+      this.shapesLayer.removeChild(this.player);
+
+      // Create a fresh player instance
+      this.player = new Fighter();
+      this.shapesLayer.addChild(this.player);
+      this.player.initPhysics(GAME_WIDTH / 2, GAME_HEIGHT - 80, this.engine.world);
       this.player.state = 'ALIVE';
+      this.player.setDouble(false);
+      this.player.setTint(0x00FFFF); // Restore default Cyan
+      this.player.isPiercing = false;
+      this.player.fireRateMultiplier = 1;
+      this.player.invulnerableTimer = 0;
       this.player.visible = true;
       this.player.alpha = 1;
+      (this.player as any)._isFalling = false;
 
-      // Reset game state
+      // Update EnemyManager's player reference
+      this.enemyManager.playerRef = this.player;
+
+      // --- 5. Clear lingering VFX particles ---
+      this.vfxManager.clearAll();
+
+      // --- 6. Reset game state ---
       this.score = 0;
       this.lives = 3;
       this.heat = 0;
@@ -523,16 +649,19 @@ export class GameApp {
       this.stateTimer = 0;
       this.shotsTotal = 0;
       this.shotsHit = 0;
+      this.nextExtendAt = 20000;
+      this.shakeIntensity = 0;
 
-      // Update UI
+      // --- 7. Update UI ---
       this.uiManager.updateScore(0, this.highScore);
       this.uiManager.updateLives(3);
       this.uiManager.updateLevel(1);
       this.uiManager.updateHeatBar(0, false);
+      this.uiManager.setFeverTone(false);
 
-      // Restart from Level 1
+      // --- 8. Restart from Level 1 ---
       this.state = GameState.INTRO;
-      this.enemyManager.spawnLevelSequence(1);
+      this.stateTimer = 0;
       console.log('Game Restarted!');
   }
 
@@ -549,12 +678,18 @@ export class GameApp {
               }
               break;
           case GameState.ENTRY:
-              // Check if all enemies are in FORMATION mode
-              const allInFormation = this.enemyManager.enemies.every(e => e.state === 'FORMATION');
-              if (allInFormation && this.enemyManager.enemies.length > 0) {
-                  this.state = GameState.FORMATION;
+              if (this.enemyManager.isChallengeStage) {
+                  this.state = GameState.ATTACK;
                   this.stateTimer = 0;
-                  console.log("State: FORMATION");
+                  console.log("State: ATTACK (Challenge)");
+              } else {
+                  // Check if all enemies are in FORMATION mode
+                  const allInFormation = this.enemyManager.enemies.every(e => e.state === 'FORMATION');
+                  if (allInFormation && this.enemyManager.enemies.length > 0) {
+                      this.state = GameState.FORMATION;
+                      this.stateTimer = 0;
+                      console.log("State: FORMATION");
+                  }
               }
               break;
           case GameState.FORMATION:
@@ -573,7 +708,7 @@ export class GameApp {
           case GameState.CLEAR:
               // GDD: Enemies Zero Check + Delay 60 frames (approx 1s)
               if (this.stateTimer > 1000) {
-                  const isChallenging = [3, 7, 11, 19, 27].includes(this.currentLevel);
+                  const isChallenging = this.enemyManager.isChallengeStage;
                   if (isChallenging) {
                       this.state = GameState.BONUS;
                       this.stateTimer = 0;
@@ -591,6 +726,7 @@ export class GameApp {
                       }
                       
                       this.addScore(bonus);
+                      SoundManager.getInstance().playStageClearSound(this.challengeHits >= 40);
                       this.uiManager.showStageBonus(this.challengeHits, bonus, true);
                   } else {
                       this.nextLevel();
@@ -612,21 +748,30 @@ export class GameApp {
       if (!this.player) return;
       const deltaFactor = delta / 16.6;
 
+      // --- 1. Find any boss currently in CAPTURING state ---
       const boss = this.enemyManager.enemies.find(e => e.sides === 6 && e.state === 'CAPTURING');
+      
       if (boss) {
-          // Create beam if not exists
+          // Create beam if not exists, update position to track boss
           if (!boss.tractorBeam) {
-              boss.tractorBeam = this.vfxManager.createTractorBeam(boss.x, boss.y + 40, 400);
+              boss.tractorBeam = this.vfxManager.createTractorBeam(boss.x, boss.y + 20, 450);
+          } else {
+              // GDD Phase 4: 光束跟隨 Boss 位置 (即使 Boss 有微小晃動)
+              const beamVisual = boss.tractorBeam as PIXI.Container;
+              if (beamVisual && !beamVisual.destroyed) {
+                  beamVisual.x = boss.x;
+                  beamVisual.y = boss.y + 20;
+              }
           }
 
-          // Check if player is in beam (Triangle area detection)
-          const beamX = boss.x;
-          const beamY = boss.y + 10; // offset for boss center
-          const topWidth = 16;
-          const bottomWidth = 48;
-          const beamHeight = 400;
-
+          // Check if player is in beam (Trapezoid area detection)
           if (this.player.state === 'ALIVE') {
+              const beamX = boss.x;
+              const beamY = boss.y + 20;
+              const topWidth = 20;
+              const bottomWidth = 60;
+              const beamHeight = 450;
+
               const relativeY = this.player.y - beamY;
               if (relativeY > 0 && relativeY < beamHeight) {
                   const currentWidth = topWidth + (bottomWidth - topWidth) * (relativeY / beamHeight);
@@ -636,101 +781,165 @@ export class GameApp {
                       console.log("Player caught in Tractor Beam!");
                       this.player.state = 'SPINNING_CAPTURE';
                       boss.capturedFighter = this.player;
+                      SoundManager.getInstance().playTractorBeamSound(); // GDD 10.2: 牽引光束警報音
 
-                      // Disable collision so captured fighter doesn't collide
+                      // Disable collision so captured fighter doesn't interact
                       Matter.Body.set(this.player.body, 'collisionFilter', { mask: 0, category: 0 });
                       
+                      // GDD: 扣除一條生命
                       if (this.lives >= 0) {
                           this.lives--;
                           this.uiManager.updateLives(this.lives);
-                          // Delay replacement spawn to give capture feel
-                          setTimeout(() => this.spawnReplacementPlayer(), 1500);
+                          
+                          if (this.lives < 0) {
+                              // Game Over — no more lives to continue
+                              setTimeout(() => this.gameOver(), 2000);
+                          }
+                          // 注意: 替補機不在這裡生成! 要等 Boss 把人質帶回陣位後才生成
                       }
                   }
               }
           }
       }
 
-      // Handle SPINNING_CAPTURE player movement (Pulled up to Boss side)
-      if (this.player.state === 'SPINNING_CAPTURE' && boss) {
-          // Pull toward Boss
-          const targetX = boss.x;
-          const targetY = boss.y;
-          const dx = targetX - this.player.x;
-          const dy = targetY - this.player.y;
-          const dist = Math.sqrt(dx * dx + dy * dy);
+      // --- 2. Handle SPINNING_CAPTURE: Player spins and gets pulled toward Boss ---
+      if (this.player.state === 'SPINNING_CAPTURE') {
+          const captureBoss = this.enemyManager.enemies.find(e => e.sides === 6 && e.capturedFighter === this.player);
+          
+          if (captureBoss) {
+              // Pull toward Boss with spiral motion
+              const targetX = captureBoss.x + 20; // Park slightly to the right
+              const targetY = captureBoss.y;
+              const dx = targetX - this.player.x;
+              const dy = targetY - this.player.y;
+              const dist = Math.sqrt(dx * dx + dy * dy);
 
-          const pullSpeed = 5 * deltaFactor;
-          if (dist > 8) {
-              Matter.Body.setPosition(this.player.body, {
-                  x: this.player.x + (dx / dist) * Math.min(dist, pullSpeed),
-                  y: this.player.y + (dy / dist) * Math.min(dist, pullSpeed)
-              });
+              const pullSpeed = 3.5 * deltaFactor;
+              
+              if (dist > 10) {
+                  // Spiral pull: add sine wave to X during ascent
+                  const spiralX = Math.sin(Date.now() * 0.008) * 15 * (dist / 300);
+                  Matter.Body.setPosition(this.player.body, {
+                      x: this.player.x + (dx / dist) * Math.min(dist, pullSpeed) + spiralX * deltaFactor,
+                      y: this.player.y + (dy / dist) * Math.min(dist, pullSpeed)
+                  });
+              } else {
+                  // Snapped to Boss — switch to CAPTURED state
+                  this.player.state = 'CAPTURED';
+                  this.player.setTint(0xFF4444); // Turn red (hostile captive)
+                  Matter.Body.setPosition(this.player.body, { x: captureBoss.x + 40, y: captureBoss.y });
+                  Matter.Body.setAngle(this.player.body, 0);
+                  this.player.scale.set(1); // Reset any pulsing
+                  console.log("Fighter captured! Now hostage beside Boss.");
+                  
+                  // Cleanup beam after capture completes
+                  if (captureBoss.tractorBeam && captureBoss.tractorBeam.cleanup) {
+                      captureBoss.tractorBeam.cleanup();
+                      captureBoss.tractorBeam = null;
+                  }
+                  // Boss returns to formation (帶著人質飛回)
+                  captureBoss.state = 'ENTERING';
+                  
+                  // Bug 2 Fix: 人質完全黏上 Boss 後，才生成替補機
+                  if (this.lives >= 0 && !this.replacementPlayer) {
+                      this.spawnReplacementPlayer();
+                  }
+              }
           } else {
-              // Snapped to Boss — switch to CAPTURED, park to Boss's left side
-              this.player.state = 'CAPTURED';
-              this.player.setTint(0xFF4444);  // Turn red (hostile captive)
-              Matter.Body.setPosition(this.player.body, { x: boss.x - 40, y: boss.y });
+              // Boss was killed during capture pull — fighter falls
+              this.startFighterFall();
           }
       }
 
-      // Handle CAPTURED state: follow Boss into formation
-      if (this.player.state === 'CAPTURED' && boss) {
-          // Ride beside Boss (left side, no physics pull needed)
-          Matter.Body.setPosition(this.player.body, { x: boss.x - 40, y: boss.y });
-          Matter.Body.setVelocity(this.player.body, { x: 0, y: 0 });
+      // --- 3. Handle CAPTURED state: Follow Boss in formation ---
+      if (this.player.state === 'CAPTURED') {
+          const hostBoss = this.enemyManager.enemies.find(e => e.sides === 6 && e.capturedFighter === this.player);
+          if (hostBoss) {
+              // Ride beside Boss (right side)
+              Matter.Body.setPosition(this.player.body, { x: hostBoss.x + 40, y: hostBoss.y });
+              Matter.Body.setVelocity(this.player.body, { x: 0, y: 0 });
+              Matter.Body.setAngle(this.player.body, 0);
+          } else {
+              // Boss is gone — start falling for potential rescue
+              this.startFighterFall();
+          }
       }
 
-      // Handle Falling Rescued/Destroyed Fighter (Boss killed while capturing)
-      if ((this.player.state === 'CAPTURED' || this.player.state === 'SPINNING_CAPTURE') && !boss && this.player.y < GAME_HEIGHT) {
-          // Boss was killed! Spiraling down per GDD
-          const fallSpeed = 3 * deltaFactor;
-          const spiralFreq = 0.1;
+      // --- 4. Handle FALLING rescued fighter ---
+      if (this.player.state === 'DEAD' && (this.player as any)._isFalling) {
+          const fallSpeed = 2.8 * deltaFactor;
+          const spiralFreq = 0.08;
           
-          let nextX = this.player.x + Math.sin(this.player.y * spiralFreq) * 2;
+          let nextX = this.player.x + Math.sin(this.player.y * spiralFreq) * 2 * deltaFactor;
           let nextY = this.player.y + fallSpeed;
 
-          // Check for magnetize (Logic: alignment then snap)
+          // Check for alignment and snap (rescue merge)
           if (this.replacementPlayer && this.replacementPlayer.state === 'ALIVE') {
               const dx = this.player.x - this.replacementPlayer.x;
               const dy = this.player.y - this.replacementPlayer.y;
-              const dist = Math.sqrt(dx*dx + dy*dy);
+              const dist = Math.sqrt(dx * dx + dy * dy);
 
-              // GDD: Align X-coordinates when close to player height
-              if (this.player.y > GAME_HEIGHT * 0.65) {
-                  const alignSpeed = 0.15 * deltaFactor;
+              // GDD: Gradually align X-coordinates when approaching player height
+              if (this.player.y > GAME_HEIGHT * 0.6) {
+                  const alignSpeed = 0.12 * deltaFactor;
                   nextX = this.player.x - dx * alignSpeed;
               }
 
-              if (dist < 30) {
+              if (dist < 35) {
                   this.completeRescue();
+                  return;
               }
           }
 
           Matter.Body.setPosition(this.player.body, { x: nextX, y: nextY });
 
-          // Fell off screen without rescue — remove captured fighter & promote replacement
-          if (this.player.y > GAME_HEIGHT + 20) {
-              // Clean up captured player
-              if (this.player.body) Matter.World.remove(this.engine.world, this.player.body);
-              this.shapesLayer.removeChild(this.player);
-
-              // Promote replacement as main player (it was already spawned in spawnReplacementPlayer)
-              if (this.replacementPlayer) {
-                  this.player = this.replacementPlayer;
-                  this.replacementPlayer = null;
-                  this.player.setTint(0x00FFFF); // reset to neon cyan
-                  this.enemyManager.playerRef = this.player; // UPDATE REFERENCE
-              } else {
-                  // No replacement yet — respawn fresh
-                  this.player = new Fighter();
-                  this.shapesLayer.addChild(this.player);
-                  this.player.initPhysics(GAME_WIDTH / 2, GAME_HEIGHT - 80, this.engine.world);
-                  this.player.state = 'ALIVE';
-                  this.player.invulnerableTimer = 2000;
-                  this.enemyManager.playerRef = this.player; // UPDATE REFERENCE
-              }
+          // Fell off screen without rescue — permanently lost
+          if (this.player.y > GAME_HEIGHT + 30) {
+              this.promoteFighterOrRespawn();
           }
+      }
+  }
+
+  /** GDD Phase 4: 開始人質戰機自由落體 (可被營救) */
+  private startFighterFall() {
+      this.player.state = 'DEAD';
+      (this.player as any)._isFalling = true;
+      this.player.setTint(0xFF8800); // Orange tint while falling
+      // Re-enable collision for potential rescue bullet hit
+      Matter.Body.set(this.player.body, 'collisionFilter', { 
+          mask: 0, category: 0 // Keep collision off: rescue is by proximity, not bullet
+      });
+      console.log("Captured fighter is falling — rescue window open!");
+  }
+
+  /** GDD Phase 4: 推進替換玩家或重新生成 */
+  private promoteFighterOrRespawn() {
+      // Clean up the falling captured player
+      if (this.player.body) Matter.World.remove(this.engine.world, this.player.body);
+      this.shapesLayer.removeChild(this.player);
+
+      if (this.replacementPlayer) {
+          this.player = this.replacementPlayer;
+          this.replacementPlayer = null;
+      } else {
+          this.player = new Fighter();
+          this.shapesLayer.addChild(this.player);
+          this.player.initPhysics(GAME_WIDTH / 2, GAME_HEIGHT - 80, this.engine.world);
+          this.player.state = 'ALIVE';
+          this.player.invulnerableTimer = 2000;
+      }
+      
+      this.enemyManager.playerRef = this.player;
+      
+      // Apply correct visual and stats depending on current Fever state
+      if (this.isFeverMode) {
+          this.player.setTint(0x0000FF);
+          this.player.isPiercing = true;
+          this.player.fireRateMultiplier = 2;
+      } else {
+          this.player.setTint(0x00FFFF);
+          this.player.isPiercing = false;
+          this.player.fireRateMultiplier = 1;
       }
   }
 
@@ -746,20 +955,25 @@ export class GameApp {
 
   private completeRescue() {
       if (!this.replacementPlayer) return;
+      
+      // Enable double fighter mode
       this.replacementPlayer.setDouble(true);
       
-      // Visual Flash on merger
+      // GDD Phase 4: 合體特效 — 大量火花 + 螢幕震動
       this.vfxManager.createFeverParticles(this.replacementPlayer.x, this.replacementPlayer.y);
+      this.shakeIntensity = 12;
+      SoundManager.getInstance().playMergeSound();
       console.log("CLICK! Magnetized 合體.");
       
       // Cleanup the rescued fighter
+      (this.player as any)._isFalling = false;
       if (this.player.body) Matter.World.remove(this.engine.world, this.player.body);
       this.shapesLayer.removeChild(this.player);
       
       // The replacement is now our primary player
       this.player = this.replacementPlayer;
       this.replacementPlayer = null;
-      this.enemyManager.playerRef = this.player; // UPDATE REFERENCE
+      this.enemyManager.playerRef = this.player;
       
       console.log("RESCUE COMPLETE: DUAL FIGHTER ENABLED!");
       
@@ -775,19 +989,26 @@ export class GameApp {
       const moveSpeed = PLAYER_SPEED * deltaFactor;
       let vx = 0;
 
-      if (this.keys['ArrowLeft'] || this.keys['KeyA']) {
-          vx = -moveSpeed;
-      } else if (this.keys['ArrowRight'] || this.keys['KeyD']) {
-          vx = moveSpeed;
+      if (!this.isPointerDown) {
+          if (this.keys['ArrowLeft'] || this.keys['KeyA']) {
+              vx = -moveSpeed;
+          } else if (this.keys['ArrowRight'] || this.keys['KeyD']) {
+              vx = moveSpeed;
+          }
+          Matter.Body.setVelocity(activeFighter.body, { x: vx, y: 0 });
+      } else {
+          // Zero velocity for physics when dragging to avoid drift
+          Matter.Body.setVelocity(activeFighter.body, { x: 0, y: 0 });
       }
 
-      Matter.Body.setVelocity(activeFighter.body, { x: vx, y: 0 });
-
-      // Handle Shooting
-      if (this.keys['Space']) {
-          // GDD: Max 2 bullets on screen
-          if (this.bullets.length < 2) {
-              const newBullets = activeFighter.fire(this.engine.world, this.shapesLayer);
+      // Handle Shooting (Auto-Fire when pointer is down or Space is pressed)
+      if (this.keys['Space'] || this.isPointerDown) {
+          // GDD: 單機最多 2 發，雙機最多 4 發 (Fever 期間數量加倍)
+          let maxBullets = activeFighter.isDouble ? 4 : 2;
+          if (this.isFeverMode) maxBullets *= 2;
+          
+          if (this.bullets.length < maxBullets) {
+              const newBullets = activeFighter.fire(this.engine.world, this.shapesLayer, this.isFeverMode);
               if (newBullets) {
                   this.bullets.push(...newBullets);
                   this.shotsTotal += newBullets.length;
@@ -798,16 +1019,31 @@ export class GameApp {
 
   private addScore(points: number) {
       let finalPoints = points;
+      // GDD: Dual Fighter Score Bonus x1.5
+      if (this.player && this.player.isDouble) {
+          finalPoints = Math.floor(finalPoints * 1.5);
+      }
       // GDD: Fever Mode Score Multiplier x2.0
       if (this.isFeverMode) {
           finalPoints = Math.floor(points * 2.0);
       }
+      const prevScore = this.score;
       this.score += finalPoints;
       if (this.score > this.highScore) {
           this.highScore = this.score;
           localStorage.setItem('antigravity_highscore', this.highScore.toString());
       }
       this.uiManager.updateScore(this.score, this.highScore);
+
+      // GDD 5.2: Extra Lives — 20k, 70k, then every 70k
+      if (prevScore < this.nextExtendAt && this.score >= this.nextExtendAt) {
+          this.lives++;
+          this.uiManager.updateLives(this.lives);
+          SoundManager.getInstance().playExtendSound();
+          console.log(`1UP! Extra life at ${this.nextExtendAt}. Lives: ${this.lives}`);
+          // Next extend threshold
+          this.nextExtendAt = this.nextExtendAt === 20000 ? 70000 : this.nextExtendAt + 70000;
+      }
   }
 
   private updateHeat(amount: number) {
@@ -823,11 +1059,15 @@ export class GameApp {
       this.feverTimer = this.FEVER_DURATION;
       this.player.isPiercing = true;
       this.player.fireRateMultiplier = 2;
+      
+      const activeFighter = this.replacementPlayer || this.player;
+      activeFighter.setTint(0x0000FF);
+      
       this.vfxManager.createFeverParticles(400, 300); // Burst from center center
       this.uiManager.showFeverFlash();
       this.uiManager.setFeverTone(true);
       this.uiManager.updateHeatBar(100, true);
-      console.log("FEVER MODE START");
+      console.log("FEVER MODE START (Deep Blue)");
   }
 
   private endFeverMode() {
@@ -835,9 +1075,13 @@ export class GameApp {
       this.heat = 0;
       this.player.isPiercing = false;
       this.player.fireRateMultiplier = 1;
+      
+      const activeFighter = this.replacementPlayer || this.player;
+      activeFighter.setTint(0x00FFFF);
+      
       this.uiManager.setFeverTone(false);
       this.uiManager.updateHeatBar(0, false);
-      console.log("FEVER MODE END");
+      console.log("FEVER MODE END (Restored Cyan)");
   }
 
   private nextLevel() {
@@ -858,8 +1102,16 @@ export class GameApp {
       this.stateTimer = 0;
       this.challengeHits = 0;
       
+      // GDD 5.1: Difficulty Scaling — pass level to enemy manager for bullet speed scaling
+      this.enemyManager.currentStage = level;
       this.enemyManager.spawnLevelSequence(level);
-      console.log(`Level ${level} Sequence Started | Rank: ${this.rank} | Challenge: ${this.enemyManager.isChallengeStage}`);
+
+      // Show "STAGE X" or "CHALLENGING STAGE" label
+      if (this.enemyManager.isChallengeStage) {
+          console.log(`=== CHALLENGING STAGE ${level} === | Rank: ${this.rank}`);
+      } else {
+          console.log(`Level ${level} Sequence Started | Rank: ${this.rank}`);
+      }
   }
 
   /**
